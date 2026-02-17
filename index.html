@@ -509,21 +509,14 @@ function stopRec(){
     }
 }
 
-/* ── GROQ CONFIG ── */
-const GROQ_KEY = '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';
-const GROQ_API = 'https://api.groq.com/openai/v1';
+/* ── SECURE API CALLS → Netlify Functions (key never in frontend) ── */
 
-/* ── STEP 1: TRANSCRIBE with Whisper ── */
+/* ── STEP 1: TRANSCRIBE via Netlify Function ── */
 async function transcribeAudio(blob) {
-    const file = new File([blob], 'recording.webm', { type: blob.type || 'audio/webm' });
     const form = new FormData();
-    form.append('file', file);
-    form.append('model', 'whisper-large-v3');
-    form.append('language', 'en');
-    form.append('response_format', 'json');
-    const res = await fetch(`${GROQ_API}/audio/transcriptions`, {
+    form.append('file', blob, 'recording.webm');
+    const res = await fetch('/.netlify/functions/transcribe', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
         body: form,
     });
     if (!res.ok) throw new Error(`Transcription error: ${await res.text()}`);
@@ -531,38 +524,18 @@ async function transcribeAudio(blob) {
     return data.text?.trim() || '';
 }
 
-/* ── STEP 2: CLASSIFY with LLaMA ── */
+/* ── STEP 2: CLASSIFY via Netlify Function ── */
 async function classifyText(text) {
-    const res = await fetch(`${GROQ_API}/chat/completions`, {
+    const res = await fetch('/.netlify/functions/classify', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            model: 'llama3-8b-8192',
-            temperature: 0.2,
-            max_tokens: 100,
-            messages: [{
-                role: 'system',
-                content: `You are a thought classifier. Return ONLY a JSON object with:
-- type: "idea" | "task" | "thought" | "urgent" | "goal"
-- keywords: 3-4 key topics separated by " · "
-- confidence: integer 80-99
-
-Rules: idea=creative/new concepts, task=action items/reminders/to-dos, urgent=deadlines/asap/critical, goal=ambitions/targets/I want to, thought=everything else.
-Return ONLY raw JSON. No markdown. No explanation.`
-            }, {
-                role: 'user',
-                content: `Classify: "${text}"`
-            }]
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
     });
     if (!res.ok) throw new Error(`Classification error: ${await res.text()}`);
     const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || '{}';
-    try {
-        return JSON.parse(raw.replace(/```json|```/g, '').trim());
-    } catch {
-        return { type: 'thought', keywords: 'General', confidence: 85 };
-    }
+    const validTypes = ['idea','task','thought','urgent','goal'];
+    if (!validTypes.includes(data.type)) data.type = 'thought';
+    return data;
 }
 
 /* ── REAL PIPELINE ── */
@@ -577,7 +550,7 @@ async function processAudio(blob) {
     } catch (err) {
         console.error(err);
         closeSheet();
-        toast('⚠️ Transcription failed — check microphone or API key', 4000);
+        toast('⚠️ Transcription failed — check mic or Netlify function logs', 4000);
         return;
     }
 
@@ -587,7 +560,7 @@ async function processAudio(blob) {
         return;
     }
 
-    // Show transcript right away
+    // Show transcript immediately
     document.getElementById('transcriptCard').textContent = text;
     document.getElementById('sheetTitle').textContent = 'Your Thought';
 
@@ -595,9 +568,7 @@ async function processAudio(blob) {
     updateSheetStatus('🤖 AI is reading your mind...');
     let analysis = { type: 'thought', keywords: 'General', confidence: 85 };
     try {
-        const result = await classifyText(text);
-        const validTypes = ['idea','task','thought','urgent','goal'];
-        if (validTypes.includes(result.type)) analysis = result;
+        analysis = await classifyText(text);
     } catch (err) {
         console.error('Classification fallback:', err);
     }
