@@ -509,31 +509,130 @@ function stopRec(){
     }
 }
 
-/* PROCESS */
-async function processAudio(blob){
-    openSheet();await sleep(1600);
-    const samples=["I need to finish the landing page mockup by Thursday and push it live this weekend.","Idea — what if Aura could connect to Notion and auto-create pages from voice notes?","Don't forget to reply to Sarah about the collab, she's been waiting three days.","I want to build a SaaS that earns $10k MRR within six months. That's the goal.","Random thought: the best TikTok hooks are ones that start mid-sentence.","This week I need to post content every single day and not skip — no excuses."];
-    const text=samples[Math.floor(Math.random()*samples.length)];
-    const analysis=classify(text);S.pending={text,analysis};
-    document.getElementById('transcriptCard').textContent=text;
-    document.getElementById('sheetTitle').textContent='Your Thought';
-    await sleep(600);
-    const tc={idea:{bg:'rgba(124,109,250,0.14)',c:'var(--indigo-bright)'},task:{bg:'rgba(45,232,200,0.11)',c:'var(--teal)'},thought:{bg:'rgba(255,179,71,0.11)',c:'var(--amber)'},urgent:{bg:'rgba(255,107,157,0.11)',c:'var(--rose)'},goal:{bg:'rgba(157,145,255,0.11)',c:'var(--indigo-bright)'}};
-    const em={idea:'💡',task:'✅',thought:'💭',urgent:'🔴',goal:'🎯'};
-    const col=tc[analysis.type]||tc.thought;
-    document.getElementById('analysisGrid').innerHTML=`<div class="analysis-card"><div class="analysis-k">Classified as</div><div class="analysis-v"><span class="type-chip" style="background:${col.bg};color:${col.c}">${em[analysis.type]||'🫧'} ${analysis.type}</span></div></div><div class="analysis-card"><div class="analysis-k">Confidence</div><div class="analysis-v" style="color:var(--teal)">${analysis.confidence}%</div></div><div class="analysis-card" style="grid-column:1/-1"><div class="analysis-k">Key topics</div><div class="analysis-v">${analysis.keywords}</div></div>`;
-    document.getElementById('analysisSection').style.display='block';
+/* ── GROQ CONFIG ── */
+const GROQ_KEY = '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';
+const GROQ_API = 'https://api.groq.com/openai/v1';
+
+/* ── STEP 1: TRANSCRIBE with Whisper ── */
+async function transcribeAudio(blob) {
+    const file = new File([blob], 'recording.webm', { type: blob.type || 'audio/webm' });
+    const form = new FormData();
+    form.append('file', file);
+    form.append('model', 'whisper-large-v3');
+    form.append('language', 'en');
+    form.append('response_format', 'json');
+    const res = await fetch(`${GROQ_API}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}` },
+        body: form,
+    });
+    if (!res.ok) throw new Error(`Transcription error: ${await res.text()}`);
+    const data = await res.json();
+    return data.text?.trim() || '';
 }
 
-function classify(text){
-    const t=text.toLowerCase();let type='thought';
-    if(t.includes('idea')||t.includes('what if')||t.includes('connect'))type='idea';
-    else if(t.includes('need to')||t.includes("don't forget")||t.includes('finish')||t.includes('reply')||t.includes('post'))type='task';
-    else if(t.includes('urgent')||t.includes('asap'))type='urgent';
-    else if(t.includes('goal')||t.includes('want to')||t.includes('build')||t.includes('earn'))type='goal';
-    const stop=new Set(['the','a','an','and','or','in','on','at','to','for','is','it','this','that','from','with','by','i']);
-    const kw=text.split(/\s+/).filter(w=>w.length>4&&!stop.has(w.toLowerCase().replace(/[^a-z]/g,''))).slice(0,4).map(w=>w.replace(/[^a-zA-Z]/g,'')).filter(Boolean).join(' · ');
-    return{type,confidence:Math.floor(Math.random()*15)+84,keywords:kw||'General'};
+/* ── STEP 2: CLASSIFY with LLaMA ── */
+async function classifyText(text) {
+    const res = await fetch(`${GROQ_API}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model: 'llama3-8b-8192',
+            temperature: 0.2,
+            max_tokens: 100,
+            messages: [{
+                role: 'system',
+                content: `You are a thought classifier. Return ONLY a JSON object with:
+- type: "idea" | "task" | "thought" | "urgent" | "goal"
+- keywords: 3-4 key topics separated by " · "
+- confidence: integer 80-99
+
+Rules: idea=creative/new concepts, task=action items/reminders/to-dos, urgent=deadlines/asap/critical, goal=ambitions/targets/I want to, thought=everything else.
+Return ONLY raw JSON. No markdown. No explanation.`
+            }, {
+                role: 'user',
+                content: `Classify: "${text}"`
+            }]
+        })
+    });
+    if (!res.ok) throw new Error(`Classification error: ${await res.text()}`);
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || '{}';
+    try {
+        return JSON.parse(raw.replace(/```json|```/g, '').trim());
+    } catch {
+        return { type: 'thought', keywords: 'General', confidence: 85 };
+    }
+}
+
+/* ── REAL PIPELINE ── */
+async function processAudio(blob) {
+    openSheet();
+
+    // TRANSCRIBE
+    updateSheetStatus('🎙️ Transcribing your voice...');
+    let text = '';
+    try {
+        text = await transcribeAudio(blob);
+    } catch (err) {
+        console.error(err);
+        closeSheet();
+        toast('⚠️ Transcription failed — check microphone or API key', 4000);
+        return;
+    }
+
+    if (!text || text.length < 2) {
+        closeSheet();
+        toast('🤫 Nothing heard — try speaking a bit louder!', 3000);
+        return;
+    }
+
+    // Show transcript right away
+    document.getElementById('transcriptCard').textContent = text;
+    document.getElementById('sheetTitle').textContent = 'Your Thought';
+
+    // CLASSIFY
+    updateSheetStatus('🤖 AI is reading your mind...');
+    let analysis = { type: 'thought', keywords: 'General', confidence: 85 };
+    try {
+        const result = await classifyText(text);
+        const validTypes = ['idea','task','thought','urgent','goal'];
+        if (validTypes.includes(result.type)) analysis = result;
+    } catch (err) {
+        console.error('Classification fallback:', err);
+    }
+
+    S.pending = { text, analysis };
+
+    // RENDER RESULTS
+    const tc = {
+        idea:    { bg:'rgba(124,109,250,0.14)', c:'var(--indigo-bright)' },
+        task:    { bg:'rgba(45,232,200,0.11)',  c:'var(--teal)' },
+        thought: { bg:'rgba(255,179,71,0.11)',  c:'var(--amber)' },
+        urgent:  { bg:'rgba(255,107,157,0.11)', c:'var(--rose)' },
+        goal:    { bg:'rgba(157,145,255,0.11)', c:'var(--indigo-bright)' },
+    };
+    const em = { idea:'💡', task:'✅', thought:'💭', urgent:'🔴', goal:'🎯' };
+    const col = tc[analysis.type] || tc.thought;
+
+    document.getElementById('analysisGrid').innerHTML = `
+        <div class="analysis-card">
+            <div class="analysis-k">Classified as</div>
+            <div class="analysis-v"><span class="type-chip" style="background:${col.bg};color:${col.c}">${em[analysis.type]||'🫧'} ${analysis.type}</span></div>
+        </div>
+        <div class="analysis-card">
+            <div class="analysis-k">Confidence</div>
+            <div class="analysis-v" style="color:var(--teal)">${analysis.confidence}%</div>
+        </div>
+        <div class="analysis-card" style="grid-column:1/-1">
+            <div class="analysis-k">Key topics</div>
+            <div class="analysis-v">${analysis.keywords || 'General'}</div>
+        </div>`;
+    document.getElementById('analysisSection').style.display = 'block';
+}
+
+function updateSheetStatus(msg) {
+    document.getElementById('transcriptCard').innerHTML = `<div class="thinking"><div class="dots"><span></span><span></span><span></span></div>${msg}</div>`;
 }
 
 /* CONFIRM BUBBLE */
