@@ -1,0 +1,12 @@
+{
+  "name": "aura-app",
+  "version": "1.0.0",
+  "description": "Aura - Voice thought capture with AI",
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "form-data": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
